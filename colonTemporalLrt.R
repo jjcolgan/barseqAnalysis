@@ -1,18 +1,21 @@
-' I feel pretty good about this model.'
-library(org.Mm.eg.db)
-library(clusterProfiler)
-library(tidyverse)
-library(DESeq2)
-library(ashr)
-library(ComplexHeatmap)
+# ' I feel pretty good about this model.'
 
-'Not entirely sure that this will work'
+# Load required libraries for analysis and plotting
+library(org.Mm.eg.db)           # Mouse genome annotation
+library(clusterProfiler)         # For gene annotation and enrichment analysis
+library(tidyverse)               # Data manipulation and visualization
+library(DESeq2)                  # RNA-seq differential expression
+library(ashr)                    # Adaptive shrinkage (not directly used here)
+library(ComplexHeatmap)          # Complex heatmaps
 
+# 'Not entirely sure that this will work'
+
+# Function to plot and save results for significant genes from DESeq2 results
 plotRes=function(deSeqResults, comparison, dds, dayList){
   sigRes = deSeqResults %>%
     as.data.frame()%>%
     filter(padj < .1,
-           abs(log2FoldChange) > .75)%>%
+           abs(log2FoldChange) > .75)%>%         # Filter significant genes
     arrange(desc(-log10(padj)))
   if (nrow(sigRes) < 100) {
     i = nrow(sigRes)
@@ -21,7 +24,7 @@ plotRes=function(deSeqResults, comparison, dds, dayList){
     i = 100
   }
   path = paste0('DeSeq2/barseqColonicOutputs/lrtResults/', comparison)
-  dir.create(path)
+  dir.create(path)                                # Create output directory
   for (j in 1:i){
     temp = sigRes[j,]
     temp = temp%>%
@@ -45,20 +48,24 @@ plotRes=function(deSeqResults, comparison, dds, dayList){
 
 }
 
-
+# Load data files
 geneExRaw<- read_csv('/Users/johnjamescolgan/Library/CloudStorage/Box-Box/b. breve/B. breve RNA seq/gene_matrix_count.csv')
 metadata <- read.csv('/Users/johnjamescolgan/Library/CloudStorage/Box-Box/b. breve/B. breve RNA seq/metadata.csv')
 biomart = read_tsv('/Users/johnjamescolgan/Library/CloudStorage/Box-Box/b. breve/B. breve RNA seq/mart_export (1).txt')
 
+# Clean up column names and biomart for later filtering
 colnames(geneExRaw) <-sub("_S\\d+.*$", "", colnames(geneExRaw))
 colnames(biomart) = c('Geneid', 'transcriptType')
 
+# Keep only protein coding genes
 proteinCoding = biomart %>%
   filter(transcriptType == 'protein_coding')
 
+# Generate a new column for groupings in metadata
 metadata=metadata%>%
   mutate(tissueDay = paste0(Tissue, Day))
 
+# Reshape and join count and metadata; filter for relevant samples (Colon, Bar-seq)
 fullDataTab=geneExRaw %>%
   pivot_longer(cols = 2:ncol(geneExRaw),
                names_to = 'library',
@@ -67,15 +74,17 @@ fullDataTab=geneExRaw %>%
   left_join(metadata, by = "library")%>%
   filter(Tissue == 'Colon'& Treatment =='Bar-seq')
 
+# Prepare metadata for DESeq2
 metaDeSeq=fullDataTab %>%
   select(-c( Geneid, unNormalizedCounts, library))%>%
   distinct()%>%
   #filter(sample != '2308Co')%>%
   column_to_rownames('sample')
 
-'Keeping the sample which has more reads in the duplicated set'
+# Keep the sample with more reads if duplicated
 desired_order <- rownames(metaDeSeq)
 
+# Prepare expression data matrix for DESeq2; keep only protein coding genes and order columns
 expressionDeseq=fullDataTab %>%
   filter(Geneid %in% proteinCoding$Geneid)%>%
   pivot_wider(id_cols = 'Geneid',
@@ -85,8 +94,10 @@ expressionDeseq=fullDataTab %>%
   select(Geneid, all_of(desired_order))%>%
   column_to_rownames('Geneid')
 
+# Map ENSEMBL gene IDs to gene symbols using clusterProfiler
 geneIds = clusterProfiler::bitr(geneID = rownames(expressionDeseq), fromType = 'ENSEMBL', toType = 'SYMBOL',org.Mm.eg.db, drop = T)
 
+# Check for genes with multiple mappings to symbols
 expressionDeseq%>%
   rownames_to_column('ENSEMBL')%>%
   left_join(geneIds , by = "ENSEMBL")%>%
@@ -96,7 +107,7 @@ expressionDeseq%>%
   summarise(observations = n())%>%
   filter(observations > 1)
 
-
+# Collapse multiple ENSEMBL IDs per symbol, summing counts if needed
 expressionDeseq=expressionDeseq %>%
   rownames_to_column('ENSEMBL') %>%
   left_join(geneIds, by = "ENSEMBL") %>%
@@ -108,27 +119,30 @@ expressionDeseq=expressionDeseq %>%
             .groups = "drop")%>%
   column_to_rownames('SYMBOL')
 
+# Check group size in metadata
 metaDeSeq%>%
   group_by(tissueDay)%>%
   summarise(n())
 
+# Bin age columns into 3 quantile groups
 metaDeSeq$Age.at.sac = cut(metaDeSeq$Age.at.sac, 3)
 metaDeSeq$Age.at.transplant = cut(metaDeSeq$Age.at.transplant, 3)
 
+# 'Adding cage results in a model with a dist of pvalues which is much worse than the model without pvalues.'
 
-
-
-'Adding cage results in a model with a dist of pvalues which is much worse than the model
-without pvalues.'
+# Create DESeq2 dataset, using only Day as design
 dds = DESeqDataSetFromMatrix(countData = expressionDeseq,
                              colData = metaDeSeq,
                              design = ~Day)
 
-'Filtering by group'
+# 'Filtering by group'
+
+# Get normalized counts and reshape for filtering
 normalizedCounts=counts(dds)%>%
   as.data.frame()%>%
   rownames_to_column('gene')
-'This is just a more sophisticated version of the deseq2 filter, where the gene needs to be pesent in at least 4 samples for 20 counts. '
+
+# Filter genes: must have at least 10 counts in 4+ samples per group
 genesPassingFilter=normalizedCounts%>%
   pivot_longer(cols = 2:ncol(normalizedCounts),
                names_to = 'sample',
@@ -141,6 +155,8 @@ genesPassingFilter=normalizedCounts%>%
   filter(nPass >= 4)%>%
   select(gene)%>%
   distinct()
+
+# Calculate variance for each gene and sort
 geneVariance=normalizedCounts%>%
   pivot_longer(cols = 2:ncol(normalizedCounts),
                names_to = 'sample',
@@ -151,33 +167,32 @@ geneVariance=normalizedCounts%>%
   summarise(variance = var(normalizedCount))%>%
   arrange(variance)
 
+# Keep top 95% variable genes
 lowerBound=nrow(geneVariance)*.05
-
 upperBound = nrow(geneVariance)
-
 genesPassingFilter=geneVariance$gene[lowerBound:upperBound]
 
-'filter low count'
-#smallestGroupSize <- 4
-#keep <- rowSums(counts(dds) >= 35) >= smallestGroupSize
+# Filter low count genes in dds
 dds <- dds[rownames(dds)%in%genesPassingFilter,]
-dds$Day =  relevel(dds$Day, ref = "1")
+dds$Day =  relevel(dds$Day, ref = "1")   # Set reference level for Day
 
-
+# Run DESeq2 using likelihood ratio test (LRT)
 dds <- DESeq(dds,test="LRT", reduced = ~1)
 
+# Plot dispersion estimates
 plotDispEsts(dds)
 
+# Perform transformations for PCA and visualization
 vsd = vst(dds, blind = T)
 plotPCA(vsd, intgroup = 'Day')
-
 plotPCA(vsd, intgroup = 'Day',returnData = T)
 
 rlogD=rlog(dds)
 plotPCA(rlogD, intgroup = 'Day')
 
-resultsNames(dds)
+resultsNames(dds) # Show available contrasts
 
+# Conduct pairwise comparisons between days and plot results
 day1VDay3 = results(dds, contrast = c('Day','1', '3'), alpha = .1)
 plotMA(day1VDay3)
 p=day1VDay3%>%
@@ -192,8 +207,7 @@ p=day1VDay3%>%
   xlim(-5,5)
 ggsave(p,filename = 'DeSeq2/barseqColonicOutputs/lrtResults/volcanoPlot1v3.pdf')
 
-
-
+# Plot histogram of p-values for visual QC
 day1VDay3%>%
   as.data.frame()%>%
   ggplot(aes(x = pvalue))+
@@ -201,14 +215,15 @@ day1VDay3%>%
   labs(title = 'Day 1 versus day 3')
 #ggsave(p,filename = 'DeSeq2/barseqColonicOutputs/lrtResults/histogramOfPvalues1v3.pdf')
 
+# Show top significant results
 day1VDay3%>%
   as.data.frame()%>%
   filter(padj < .1,
          abs(log2FoldChange) > 1.5)%>%
   arrange(desc(-log10(padj)))
-'Fold change close to cut off, pvalue is fine.'
+# 'Fold change close to cut off, pvalue is fine.'
 
-
+# Repeat for other day comparisons
 day1VDay7 = results(dds, contrast = c('Day','1', '7'), alpha = .1)
 plotMA(day1VDay7)
 day1VDay7%>%
@@ -235,8 +250,6 @@ filter(padj < .1,
 abs(log2FoldChange) > 1.5)%>%
 arrange(desc(-log10(padj)))
 
-
-
 day1VDay14 = results(dds, contrast = c('Day','1', '14'), alpha = .1)
 plotMA(day1VDay14)
 
@@ -262,7 +275,6 @@ day1VDay14 %>%
   filter(padj < .1,
          abs(log2FoldChange) > 1.5)%>%
   arrange(desc(-log10(padj)))
-
 
 day3VDay7 = results(dds, contrast = c('Day','3', '7'))
 plotMA(day3VDay7)
@@ -319,7 +331,6 @@ day7VDay14%>%
 
 as.data.frame(day7VDay14)[1,]
 
-
 day3VDay14  = results(dds, contrast = c('Day','3', '14'))
 
 p = day3VDay14%>%
@@ -337,9 +348,10 @@ day3VDay14%>%
   labs(title = 'day 3 v day 14')
 #ggsave(p,filename = 'DeSeq2/barseqColonicOutputs/lrtResults/volcanoPlot7v14.pdf')
 
+# 'I might be using the wrong table to perform my correlation analysis.
+# I think either the vst dataframe or rlog dataframe might be better '
 
-'I might be using the wrong table to perform my correlation analysis.
-I think either the vst dataframe or rlog dataframe might be better '
+# Preview transformed data for correlation
 assay(vsd)%>%
   as.data.frame()%>%
   head()
@@ -350,6 +362,7 @@ expressionRlogNorm=assay(rlogD)%>%
 expressionVsNorm = assay(vsd)%>%
   as.data.frame()
 
+# Plot and save top results for each comparison using the earlier function
 plotRes(deSeqResults = day7VDay14,
         comparison = 'Day7VDay14',
         dayList = c('7','14'),
@@ -375,6 +388,7 @@ plotRes(deSeqResults = day1VDay14,
         dayList = c('1', '14'),
         dds = dds)
 
+# Save all results tables to TSV files for further analysis
 day1VDay3%>%
   as.data.frame()%>%
   rownames_to_column('SYMBOL')%>%
@@ -400,6 +414,7 @@ day7VDay14%>%
   rownames_to_column('SYMBOL')%>%
   write_tsv('DeSeq2/barseqColonicOutputs/lrtResults/Day7VDay14/deseqResults.tsv')
 
+# Extract significant genes for each comparison (abs(log2FC) > .75, padj < .1)
 sigDay1Day3=day1VDay3%>%
   as.data.frame()%>%
   filter(abs(log2FoldChange) >.75 & padj < .1)
@@ -424,9 +439,10 @@ sigDay3Day14 = day3VDay14%>%
   as.data.frame()%>%
   filter(abs(log2FoldChange) >.75 & padj < .1)
 
-
+# Combine all significant genes from a subset of comparisons
 sigAll=rbind(sigDay1Day3, sigDay3Day7, sigDay7Day14)
 
+# Extract normalized counts for significant genes for downstream analysis
 sigGeneTab=assay(vsd) %>%
   as.data.frame()%>%
   rownames_to_column('SYMBOL')%>%
@@ -435,6 +451,7 @@ sigGeneTab=assay(vsd) %>%
 write_tsv(sigGeneTab,
           file = 'DeSeq2/barseqColonicOutputs/lrtResults/sigGeneTab.tsv')
 
+# Save additional result tables for each comparison
 day1VDay3%>%
   as.data.frame()%>%
   rownames_to_column('SYMBOL')%>%
@@ -455,7 +472,7 @@ assay(vsd) %>%
   rownames_to_column('SYMBOL')%>%
   write_tsv(file = 'DeSeq2/barseqColonicOutputs/lrtResults/allGenesTab.tsv')
 
-
+# Plot histogram of log2 fold changes for all significant genes
 rbind(day1VDay3,
       day3VDay7,
       day7VDay14
@@ -466,6 +483,7 @@ rbind(day1VDay3,
   ggplot(aes(x = abs(log2FoldChange)))+
   geom_histogram(bins = 25)
 
+# Get integration genes with strong changes across any comparison
 integrationGenes=rbind(day1VDay3,
       day3VDay7,
       day7VDay14
@@ -483,5 +501,4 @@ assay(vsd) %>%
   rownames_to_column('SYMBOL')%>%
   filter(SYMBOL %in% integrationGenes)%>%
   write_tsv(file = 'DeSeq2/barseqColonicOutputs/lrtResults/integrationGenes.tsv')
-
 
